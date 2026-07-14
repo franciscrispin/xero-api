@@ -31,10 +31,15 @@ The user is assumed to have a Xero account but **no developer account yet**.
 Split of work:
 
 - **You (the agent) do**: create the Python environment, install dependencies,
-  write `.env`, build the authorize command, run `demo.py`, and diagnose errors.
+  create the empty `.env` file, build the authorize command, run `demo.py`, and
+  diagnose errors.
 - **The user must do in a browser** (you cannot): create the developer account,
   create the app, generate the client secret, and click "Allow access" during
   consent. Give them the exact values to enter, then wait.
+- **The client secret**: never ask the user to paste the client secret (or the
+  client id) into the chat. A pasted secret is sent to the model provider and can
+  be kept in conversation logs. The user types it straight into the local `.env`
+  file, which you never read. See Step 3.
 - **Running `authorize.py`**: it opens a browser and listens on `localhost`. If you
   (the agent) run on the **same computer** as the user's browser, you can run it.
   If you run on a server or a different machine, give the user the command to run
@@ -75,8 +80,9 @@ Then:
 3. Click **Generate a secret** and copy it now (it is shown once).
 4. Copy the **Client id** from the same page.
 
-Ask the user to paste the **Client id** and **Client secret** back to you. (The
-secret is sensitive; it will be stored only in a local, gitignored `.env` file.)
+Ask the user to keep the **Client id** and **Client secret** for the next step.
+**Do not ask them to paste either value into the chat.** They will type them
+directly into the local `.env` file, which stays on their machine and is gitignored.
 
 > Redirect URI must match exactly. If you later change the port (see Troubleshooting),
 > add the new `http://localhost:<port>/callback` here too. Xero allows several
@@ -93,12 +99,25 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Then write the user's credentials into `.env`:
+Now the **user** puts their credentials into `.env` themselves. Do not ask for the
+values; hand them the instruction and let them edit the file. Any of these works:
 
-```
-XERO_CLIENT_ID=<the client id they gave you>
-XERO_CLIENT_SECRET=<the client secret they gave you>
-```
+- Open `.env` in a text editor and fill in the two lines:
+  ```
+  XERO_CLIENT_ID=...their client id...
+  XERO_CLIENT_SECRET=...their client secret...
+  ```
+- Or, from a terminal, append the secret without it showing on screen (works in
+  bash and zsh):
+  ```bash
+  printf 'Paste client secret (hidden): '; read -rs XERO_CLIENT_SECRET; echo
+  echo "XERO_CLIENT_SECRET=$XERO_CLIENT_SECRET" >> .env; unset XERO_CLIENT_SECRET
+  ```
+  (The client id is not secret, so you can just type it into the file.)
+
+You (the agent) do not need to see these values. If the user has already pasted a
+secret into a chat somewhere, tell them to rotate it: Xero app **Configuration >
+Generate a secret** issues a new one and invalidates the old.
 
 ## Step 4 — Choose scopes and build the authorize command [agent]
 
