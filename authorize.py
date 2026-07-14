@@ -36,6 +36,8 @@ from pathlib import Path
 import requests
 from dotenv import load_dotenv
 
+from xero_client import _atomic_write_json, _migrate_store
+
 load_dotenv()  # load .env now so XERO_REDIRECT_PORT below can override the default
 
 AUTHORIZE_URL = "https://login.xero.com/identity/connect/authorize"
@@ -189,10 +191,23 @@ def _basic_auth(client_id, client_secret):
     return "Basic " + base64.b64encode(raw).decode()
 
 
-def _save_store(store):
-    with open(STORE_PATH, "w") as f:
-        json.dump(store, f, indent=2)
-    os.chmod(STORE_PATH, 0o600)
+def _load_store_or_empty():
+    """Return the existing (migrated) multi-profile store, or a fresh empty one."""
+    path = Path(STORE_PATH)
+    if not path.exists():
+        return {"version": 2, "active": None, "profiles": {}}
+    with open(path) as f:
+        raw = json.load(f)
+    store, _ = _migrate_store(raw)
+    return store
+
+
+def _default_profile_name(chosen):
+    """Infer a profile name from the chosen tenant if the user didn't pass one."""
+    name = (chosen.get("tenantName") or "").lower()
+    if "demo" in name:
+        return "demo"
+    return "real"
 
 
 def resolve_scopes(raw_scopes, catalog):
@@ -236,6 +251,18 @@ def main():
         action="store_true",
         help="Request every scope in scopes.txt except EXCLUDED_FROM_ALL "
         "(currently just app.connections, which Xero rejects for this flow).",
+    )
+    parser.add_argument(
+        "--profile",
+        default=None,
+        help="Name to store this authorization under (e.g. demo, real). Existing "
+        "profiles are preserved. Defaults to 'demo' for the Demo Company, else 'real'.",
+    )
+    parser.add_argument(
+        "--tenant",
+        default=None,
+        help="Preselect the active organisation by tenantName (case-insensitive) or "
+        "tenantId, skipping the interactive prompt when the auth reaches several orgs.",
     )
     args = parser.parse_args()
 
@@ -325,7 +352,7 @@ def main():
         sys.exit(f"Token exchange failed ({resp.status_code}): {resp.text}")
     tok = resp.json()
 
-    store = {
+    profile = {
         "access_token": tok["access_token"],
         "refresh_token": tok["refresh_token"],
         "expires_at": time.time() + tok["expires_in"] - 120,
@@ -336,7 +363,7 @@ def main():
     conns = requests.get(
         CONNECTIONS_URL,
         headers={
-            "Authorization": f"Bearer {store['access_token']}",
+            "Authorization": f"Bearer {profile['access_token']}",
             "Content-Type": "application/json",
         },
         timeout=30,
@@ -347,32 +374,70 @@ def main():
     if not connections:
         sys.exit("No connections returned. Did you select an organisation during consent?")
 
-    store["connections"] = [
+    profile["connections"] = [
         {"tenantId": c["tenantId"], "tenantName": c.get("tenantName"), "tenantType": c.get("tenantType")}
         for c in connections
     ]
 
-    # Prefer the Demo Company for first testing (free, consumes no subscription).
+    # Choose the active tenant for this profile. If the user named the profile
+    # 'real' (or anything non-demo), prefer a real org; otherwise prefer the Demo
+    # Company for safe first testing. The user can still switch later without
+    # re-authorizing (xero_profiles.py tenant ...).
     demo = next((c for c in connections if "demo" in (c.get("tenantName") or "").lower()), None)
-    if demo:
+    real = next((c for c in connections if c is not demo), None)
+    prefer_real = args.profile is not None and args.profile.lower() != "demo"
+
+    if prefer_real and real:
+        chosen = real
+    elif demo:
         chosen = demo
     elif len(connections) == 1:
         chosen = connections[0]
-    else:
-        print("\nMultiple organisations found:")
+
+    # --tenant preselects non-interactively (needed when this runs unattended).
+    if args.tenant:
+        match = next(
+            (
+                c
+                for c in connections
+                if c["tenantId"] == args.tenant
+                or (c.get("tenantName") or "").lower() == args.tenant.lower()
+            ),
+            None,
+        )
+        if not match:
+            names = ", ".join(c.get("tenantName") or "?" for c in connections)
+            sys.exit(f"--tenant '{args.tenant}' matched no connected org. Reachable: {names}.")
+        chosen = match
+    elif len(connections) > 1:
+        print("\nOrganisations this authorization can reach:")
         for i, c in enumerate(connections):
-            print(f"  [{i}] {c.get('tenantName')}  ({c.get('tenantType')})  {c['tenantId']}")
-        idx = int(input("Pick the number to use as the active tenant: ").strip())
-        chosen = connections[idx]
+            marker = " <- default" if c["tenantId"] == chosen["tenantId"] else ""
+            print(f"  [{i}] {c.get('tenantName')}  ({c.get('tenantType')})  {c['tenantId']}{marker}")
+        raw = input(f"Pick the active tenant [{connections.index(chosen)}]: ").strip()
+        if raw:
+            chosen = connections[int(raw)]
 
-    store["tenant_id"] = chosen["tenantId"]
-    store["tenant_name"] = chosen.get("tenantName")
-    _save_store(store)
+    profile["tenant_id"] = chosen["tenantId"]
+    profile["tenant_name"] = chosen.get("tenantName")
 
-    print(f"\nSaved {STORE_PATH}. Active tenant: {store['tenant_name']} ({store['tenant_id']}).")
-    if demo:
-        print("This is the Demo Company, good for first tests. Re-run and pick another tenant for live data.")
-    print("Next: python demo.py")
+    profile_name = args.profile or _default_profile_name(chosen)
+
+    # Merge into the existing store, preserving other profiles, and activate this one.
+    store = _load_store_or_empty()
+    existed = profile_name in store["profiles"]
+    store["profiles"][profile_name] = profile
+    store["active"] = profile_name
+    _atomic_write_json(STORE_PATH, store)
+
+    verb = "Updated" if existed else "Added"
+    print(f"\n{verb} profile '{profile_name}' in {STORE_PATH} and set it active.")
+    print(f"Active tenant: {profile['tenant_name']} ({profile['tenant_id']}).")
+    others = [p for p in store["profiles"] if p != profile_name]
+    if others:
+        print(f"Other saved profiles (preserved): {', '.join(others)}.")
+        print("Switch anytime with:  python xero_profiles.py use <name>")
+    print(f"Next: python demo.py --profile {profile_name}")
 
 
 if __name__ == "__main__":

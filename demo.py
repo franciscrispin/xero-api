@@ -5,8 +5,11 @@ a permission error on one does not stop the others. Run against the Demo Company
 first (authorize.py selects it automatically if present); it consumes no
 subscription.
 
-    python demo.py
+    python demo.py                 # uses the active profile
+    python demo.py --profile real  # uses a specific profile
 """
+
+import argparse
 
 from xero_client import XeroClient, XeroError
 
@@ -20,9 +23,16 @@ def try_read(label, fn):
 
 
 def main():
-    client = XeroClient()  # loads .env + tokens.json
-    print(f"Tenant: {client.store.get('tenant_name')} ({client.store.get('tenant_id')})")
-    print(f"Granted scope: {client.store.get('scope')}\n")
+    parser = argparse.ArgumentParser(description="Xero connection smoke test.")
+    parser.add_argument(
+        "--profile", default=None, help="Profile to use (default: the active one)."
+    )
+    args = parser.parse_args()
+
+    client = XeroClient(profile=args.profile)  # loads .env + tokens.json
+    print(f"Profile: {client.profile}")
+    print(f"Tenant: {client.prof.get('tenant_name')} ({client.prof.get('tenant_id')})")
+    print(f"Granted scope: {client.prof.get('scope')}\n")
 
     # Force the refresh-then-persist path so you can see it work end to end.
     # In normal use you would just call client.get(...) and let ensure_token()

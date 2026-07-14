@@ -181,24 +181,86 @@ the request.
 ## Step 5 — Authorize in the browser [user, or agent if same machine]
 
 Run the command from Step 4. It prints the scopes, opens the browser, and waits.
-The user logs in, picks the organisation, and clicks **Allow access**. If the user's
-login can see the **Demo Company**, the script selects it automatically for safe
-first testing.
+The user logs in, picks the organisation(s), and clicks **Allow access**. If the
+user's login can see the **Demo Company**, the script selects it automatically for
+safe first testing.
 
-Result: a local `tokens.json` (gitignored, permissions 600).
+Add `--profile <name>` to store the authorization under a named profile (e.g.
+`--profile demo` or `--profile real`); existing profiles are preserved and the new
+one becomes active. With no `--profile`, the name is inferred (`demo` for the Demo
+Company, else `real`). See [Profiles](#profiles-demo-vs-real) below.
+
+Result: a local `tokens.json` (gitignored, permissions 600) holding one or more
+named profiles.
 
 ## Step 6 — Verify [agent]
 
 ```bash
-python demo.py
+python demo.py                 # uses the active profile
+python demo.py --profile real  # uses a specific profile
 ```
 
 It refreshes the token (persisting the rotated refresh token first), then reads a
 few records using whatever scopes were granted. If any section prints data, the
 connection works and refreshes itself from here on.
 
-To switch from the Demo Company to the real organisation, re-run the Step 4 command
-and pick that organisation when prompted (or delete `tokens.json` and re-authorize).
+To add a second organisation as its own profile, re-run the Step 4 command with a
+different `--profile` name (e.g. `--profile real`). See [Profiles](#profiles-demo-vs-real).
+
+---
+
+## Profiles (demo vs real)
+
+`tokens.json` holds one or more **named profiles**, each an independent
+authorization with its **own rotating refresh token**. This lets you keep, say, a
+`demo` profile and a `real` profile side by side and switch between them.
+
+```json
+{
+  "version": 2,
+  "active": "real",
+  "profiles": {
+    "demo": { "access_token": "…", "refresh_token": "…", "tenant_id": "…",
+              "tenant_name": "Demo Company (Global)", "connections": [ … ] },
+    "real": { "…": "…", "tenant_name": "playertwos" }
+  }
+}
+```
+
+Manage them with `xero_profiles.py`:
+
+```bash
+python xero_profiles.py                 # list profiles; * marks the active one
+python xero_profiles.py use real        # set the active profile
+python xero_profiles.py tenant demo     # switch the active org within a profile
+python xero_profiles.py tenant "Demo Company (Global)" --profile demo
+```
+
+Add a new profile by authorizing into it (existing profiles are preserved):
+
+```bash
+python authorize.py --profile real --all-scopes            # opens the browser
+python authorize.py --profile real --tenant playertwos …   # preselect the org, unattended
+```
+
+**Two things to understand about scope of access:**
+
+- **Independent refresh tokens.** Refreshing one profile never rotates or
+  invalidates another's token. This is the reason to use separate profiles rather
+  than one shared token.
+- **Profiles are *not* org isolation.** Xero grants connections at the **app + org**
+  level, shared across every authorization of the same app. If your login can see
+  several orgs, Xero's consent screen pre-selects them all and you cannot deselect
+  an already-connected org. So every profile of one app reaches the *same* set of
+  orgs (`connections`); the profile's `tenant_id` just picks the default active one,
+  and `tenant` can repoint it to any connected org. **A profile name is a
+  convention, not a wall.** For a token that *physically cannot* reach another org,
+  create a separate Xero app (its own `client_id`/`client_secret`) connected only to
+  that org.
+
+Legacy single-tenant `tokens.json` files (from before profiles) are migrated
+automatically on first load: the old token set becomes one profile (`demo` if its
+tenant looks like the Demo Company, else `default`).
 
 ---
 
@@ -207,13 +269,28 @@ and pick that organisation when prompted (or delete `tokens.json` and re-authori
 ```python
 from xero_client import XeroClient
 
-client = XeroClient()                     # loads .env + tokens.json
+client = XeroClient()                     # active profile; loads .env + tokens.json
+client = XeroClient(profile="real")       # or a specific profile
+
 org = client.get("Organisation")          # any GET under api.xro/2.0
 invoices = client.get("Invoices", params={"page": 1})
+new_inv = client.post("Invoices", {       # POST/create (needs a write scope)
+    "Invoices": [{
+        "Type": "ACCREC",
+        "Contact": {"ContactID": "…"},
+        "LineItems": [{"Description": "Item", "Quantity": 1,
+                        "UnitAmount": 100.0, "AccountCode": "200"}],
+        "Status": "DRAFT",
+    }],
+})
+
+client.switch_tenant("playertwos")        # repoint this profile at another
+                                          # connected org (persisted, no re-auth)
 ```
 
-`client.get(...)` refreshes only when needed and **persists the rotated refresh
-token to disk before making the API call**. You never handle tokens by hand.
+`client.get(...)` / `client.post(...)` refresh only when needed and **persist the
+rotated refresh token to disk before making the API call**. You never handle tokens
+by hand. `client.prof` is the active profile's dict (e.g. `client.prof["tenant_name"]`).
 
 ## The one rule that keeps this alive
 
@@ -224,9 +301,12 @@ atomically (temp file → fsync → `os.replace`) the instant it receives the ne
 
 Do not:
 
-- **Run two copies at once** against the same `tokens.json` (concurrent refreshes
-  race; one wins and invalidates the other). Single writer only.
-- **Restore an old `tokens.json` from backup** and use it (its refresh token is stale).
+- **Run two copies at once** against the same `tokens.json` — **even on different
+  profiles**. Each save rewrites the whole file, so two processes that both load,
+  refresh, and save will have the second clobber the first's rotated token (a lost
+  rotation = a dead connection). Single writer per `tokens.json`, regardless of
+  profile.
+- **Restore an old `tokens.json` from backup** and use it (its refresh tokens are stale).
 
 ## Good to know
 
