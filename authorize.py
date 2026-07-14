@@ -66,6 +66,79 @@ def load_catalog():
     return {ln.strip() for ln in lines if ln.strip() and not ln.startswith("#")}
 
 
+# Callback success page, styled to the Agent Works deck design system
+# (warm paper, copper accent, Fraunces + Instrument Sans, 6px copper top rule).
+# Self-contained: Google Fonts load if online, with graceful serif/sans fallbacks.
+SUCCESS_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Xero connected · Agent Works</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400..700;1,9..144,400..700&family=Instrument+Sans:ital,wght@0,400..700;1,400..700&display=swap" rel="stylesheet">
+<style>
+:root{
+  --paper:#FBF7EF; --ink:#26211A; --muted:#71685A; --line:#E3D9C6;
+  --copper:#B4522A; --copper-deep:#93401F; --copper-soft:#F6E3D7;
+  --serif:"Fraunces",Georgia,"Times New Roman",serif;
+  --sans:"Instrument Sans",system-ui,-apple-system,sans-serif;
+  --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0;}
+body{
+  font-family:var(--sans);color:var(--ink);background:var(--paper);
+  min-height:100vh;display:flex;align-items:center;justify-content:center;
+  padding:32px;-webkit-font-smoothing:antialiased;
+}
+.topbar{position:fixed;top:0;left:0;right:0;height:6px;background:var(--copper);}
+.card{
+  background:#FFFDF8;border:1px solid var(--line);border-radius:18px;
+  box-shadow:0 10px 34px rgba(60,45,20,.09);
+  max-width:560px;width:100%;padding:56px 56px 40px;text-align:center;
+}
+.kicker{
+  font-family:var(--mono);font-size:13px;font-weight:600;letter-spacing:2px;
+  text-transform:uppercase;color:var(--copper);margin-bottom:28px;
+}
+.check{
+  width:72px;height:72px;border-radius:50%;background:var(--copper);
+  display:flex;align-items:center;justify-content:center;margin:0 auto 28px;
+  box-shadow:0 4px 14px rgba(180,82,42,.28);
+}
+.check svg{width:34px;height:34px;}
+h1{font-family:var(--serif);font-size:42px;font-weight:600;line-height:1.1;letter-spacing:-.5px;}
+h1 .accent{color:var(--copper);font-style:italic;}
+p.lead{color:var(--muted);font-size:19px;line-height:1.55;margin-top:18px;}
+.hint{
+  margin-top:30px;padding:14px 18px;border-radius:12px;
+  background:var(--copper-soft);border:1px solid #E4C3AC;
+  font-family:var(--mono);font-size:14px;color:var(--copper-deep);
+}
+.foot{
+  margin-top:36px;padding-top:20px;border-top:1px solid var(--line);
+  font-family:var(--mono);font-size:12px;font-weight:600;letter-spacing:1.5px;
+  text-transform:uppercase;color:var(--muted);
+}
+</style>
+</head>
+<body>
+<div class="topbar"></div>
+<main class="card">
+  <div class="kicker">Xero · Connected</div>
+  <div class="check">
+    <svg viewBox="0 0 24 24" fill="none" stroke="#FFF8EE" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
+  </div>
+  <h1>You're <span class="accent">connected</span>.</h1>
+  <p class="lead">Xero authorization received. You can close this tab and return to the terminal.</p>
+  <div class="hint">The setup script is finishing in your terminal.</div>
+  <div class="foot">Agent Works</div>
+</main>
+</body>
+</html>"""
+
+
 class _CallbackHandler(BaseHTTPRequestHandler):
     result = {}
 
@@ -76,13 +149,12 @@ class _CallbackHandler(BaseHTTPRequestHandler):
             self.end_headers()
             return
         _CallbackHandler.result = dict(urllib.parse.parse_qsl(parsed.query))
+        body = SUCCESS_HTML.encode("utf-8")
         self.send_response(200)
-        self.send_header("Content-Type", "text/html")
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(
-            b"<h2>Xero authorization received.</h2>"
-            b"<p>You can close this tab and return to the terminal.</p>"
-        )
+        self.wfile.write(body)
 
     def log_message(self, *args):
         pass  # keep the terminal quiet
