@@ -7,6 +7,9 @@
 # Full reference: https://developer.xero.com/documentation/guides/oauth2/scopes/
 
 # --- Connections (non-tenanted) ---
+# NOTE: Xero's authorize endpoint rejects app.connections outright for this app
+# (access_denied: "Requested wrong apps scopes"), even requested alone. It's excluded
+# from authorize.py --all-scopes -- see EXCLUDED_FROM_ALL in authorize.py.
 app.connections
 
 # --- Accounting: settings, contacts, attachments, budgets ---

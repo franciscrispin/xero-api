@@ -164,6 +164,20 @@ python authorize.py --scopes accounting.invoices.read accounting.invoices accoun
 
 With no `--scopes`, a read-only accounting starter set is used.
 
+**If the user wants everything**, don't hand-type every scope from the table above —
+run:
+
+```bash
+python authorize.py --all-scopes
+```
+
+This requests every scope in `scopes.txt` except `app.connections`, which Xero
+rejects outright for this app's flow (confirmed empirically; see `EXCLUDED_FROM_ALL`
+in `authorize.py`). Nothing this project uses needs `app.connections`, so the
+exclusion costs nothing. Everything else — including the full Payroll set — has been
+verified to authorize together in one consent round once `app.connections` is out of
+the request.
+
 ## Step 5 — Authorize in the browser [user, or agent if same machine]
 
 Run the command from Step 4. It prints the scopes, opens the browser, and waits.
@@ -235,3 +249,4 @@ Do not:
 | `invalid_grant` on refresh | The refresh token is dead (unused >60 days, revoked, or a rotation was lost). Re-run `authorize.py`. |
 | `Unknown scope(s)` | A scope is misspelled. Check it against `scopes.txt`. |
 | A `demo.py` section is "skipped" | That data's scope was not granted. Re-run `authorize.py` with the scope added if you need it. |
+| `access_denied: Requested wrong apps scopes` | One (or more) requested scopes isn't valid for this app/org — not the OAuth config. `app.connections` is a known offender (see `EXCLUDED_FROM_ALL` in `authorize.py`); drop it first. If it persists with a custom `--scopes` list, bisect: run half the list, then the other half, and recurse into whichever half fails to find the bad scope. `authorize.py` prints this same advice when it hits the error. |

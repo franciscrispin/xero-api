@@ -5,9 +5,15 @@ Scopes are chosen at run time, not hardcoded. Pass them with --scopes:
     python authorize.py --scopes accounting.invoices.read accounting.contacts.read
     python authorize.py --scopes "accounting.invoices accounting.invoices.read"
 
+Or request everything in one go:
+
+    python authorize.py --all-scopes
+
 offline_access is added automatically (mandatory for a refresh token). Valid scope
 strings are validated against scopes.txt. With no --scopes, a read-only accounting
-default is used.
+default is used. --all-scopes requests every scope in scopes.txt except those in
+EXCLUDED_FROM_ALL (see the comment there — Xero rejects some scopes outright for
+this flow, regardless of what else is requested alongside them).
 
 The script opens your browser, you consent, it catches the redirect on the loopback
 port, swaps the code for tokens, fetches your tenantId, and writes tokens.json.
@@ -47,6 +53,17 @@ REDIRECT_URI = f"http://localhost:{REDIRECT_PORT}/callback"
 # Always allowed, even though they are not in scopes.txt.
 ALWAYS_VALID = {"offline_access", "openid", "profile", "email"}
 
+# Scopes present in scopes.txt that --all-scopes should NOT request.
+#
+# app.connections: confirmed empirically (2026-07-14) that Xero's authorize endpoint
+# returns "access_denied: Requested wrong apps scopes" whenever this scope is present
+# in the request -- alone, or combined with any other scopes. It's a non-tenanted
+# scope for managing the Connections API directly, which this project's tenant-scoped
+# XeroClient never calls, so there's nothing lost by excluding it. If a future app
+# needs it, request it on its own with --scopes app.connections and expect it to be
+# rejected until Xero support enables it for the app.
+EXCLUDED_FROM_ALL = {"app.connections"}
+
 # Used only when --scopes is omitted: a safe read-only accounting starter set.
 DEFAULT_SCOPES = [
     "accounting.settings.read",
@@ -64,6 +81,13 @@ DEFAULT_SCOPES = [
 def load_catalog():
     lines = SCOPES_FILE.read_text().splitlines()
     return {ln.strip() for ln in lines if ln.strip() and not ln.startswith("#")}
+
+
+def load_all_scopes_ordered():
+    """Every scope in scopes.txt, file order, minus EXCLUDED_FROM_ALL."""
+    lines = SCOPES_FILE.read_text().splitlines()
+    scopes = [ln.strip() for ln in lines if ln.strip() and not ln.startswith("#")]
+    return [s for s in scopes if s not in EXCLUDED_FROM_ALL]
 
 
 # Callback success page, styled to the Agent Works deck design system
@@ -199,12 +223,19 @@ def resolve_scopes(raw_scopes, catalog):
 
 def main():
     parser = argparse.ArgumentParser(description="One-time Xero authorization.")
-    parser.add_argument(
+    scope_group = parser.add_mutually_exclusive_group()
+    scope_group.add_argument(
         "--scopes",
         nargs="+",
         default=None,
         help="Scopes to request (space or comma separated). See scopes.txt. "
         "offline_access is added automatically.",
+    )
+    scope_group.add_argument(
+        "--all-scopes",
+        action="store_true",
+        help="Request every scope in scopes.txt except EXCLUDED_FROM_ALL "
+        "(currently just app.connections, which Xero rejects for this flow).",
     )
     args = parser.parse_args()
 
@@ -213,7 +244,15 @@ def main():
     if not client_id or not client_secret:
         sys.exit("XERO_CLIENT_ID / XERO_CLIENT_SECRET missing. Copy .env.example to .env and fill it in.")
 
-    scopes = resolve_scopes(args.scopes, load_catalog())
+    if args.all_scopes:
+        print(
+            f"--all-scopes: requesting every scope in scopes.txt except "
+            f"{', '.join(sorted(EXCLUDED_FROM_ALL))} (see EXCLUDED_FROM_ALL in "
+            "authorize.py for why).\n"
+        )
+        scopes = resolve_scopes([" ".join(load_all_scopes_ordered())], load_catalog())
+    else:
+        scopes = resolve_scopes(args.scopes, load_catalog())
     print("Requesting scopes:")
     for s in scopes:
         print(f"  - {s}")
@@ -248,7 +287,20 @@ def main():
     result = _CallbackHandler.result
 
     if "error" in result:
-        sys.exit(f"Authorization failed: {result.get('error')} {result.get('error_description', '')}")
+        err = result.get("error", "")
+        desc = result.get("error_description", "")
+        msg = f"Authorization failed: {err} {desc}"
+        if err == "access_denied" and "scope" in desc.lower():
+            msg += (
+                "\n\nXero rejected the whole request because of one or more scopes in "
+                "it -- this is a scope-level problem (not enabled for this app/org, or "
+                "needs certification), not an OAuth config problem. To find the culprit, "
+                "bisect: split the scope list in half, run --scopes with just the first "
+                "half, then the second half, and recurse into whichever half fails. "
+                "(app.connections is a known offender -- see EXCLUDED_FROM_ALL in this "
+                "file -- so try dropping it first if it's in your list.)"
+            )
+        sys.exit(msg)
     if result.get("state") != state:
         sys.exit("State mismatch. Aborting (possible CSRF). Run the script again.")
     code = result.get("code")
