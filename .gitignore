@@ -1,0 +1,10 @@
+# Secrets and rotating tokens. Never commit these.
+.env
+tokens.json
+.tokens.*.tmp
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
