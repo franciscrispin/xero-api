@@ -258,10 +258,6 @@ python authorize.py --profile real --tenant playertwos …   # preselect the org
   create a separate Xero app (its own `client_id`/`client_secret`) connected only to
   that org.
 
-Legacy single-tenant `tokens.json` files (from before profiles) are migrated
-automatically on first load: the old token set becomes one profile (`demo` if its
-tenant looks like the Demo Company, else `default`).
-
 ---
 
 ## Using it in code

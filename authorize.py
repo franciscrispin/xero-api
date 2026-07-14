@@ -36,7 +36,7 @@ from pathlib import Path
 import requests
 from dotenv import load_dotenv
 
-from xero_client import _atomic_write_json, _migrate_store
+from xero_client import _atomic_write_json
 
 load_dotenv()  # load .env now so XERO_REDIRECT_PORT below can override the default
 
@@ -192,13 +192,15 @@ def _basic_auth(client_id, client_secret):
 
 
 def _load_store_or_empty():
-    """Return the existing (migrated) multi-profile store, or a fresh empty one."""
+    """Return the existing multi-profile store, or a fresh empty one."""
     path = Path(STORE_PATH)
     if not path.exists():
         return {"version": 2, "active": None, "profiles": {}}
     with open(path) as f:
-        raw = json.load(f)
-    store, _ = _migrate_store(raw)
+        store = json.load(f)
+    store.setdefault("version", 2)
+    store.setdefault("profiles", {})
+    store.setdefault("active", None)
     return store
 
 

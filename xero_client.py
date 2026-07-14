@@ -22,10 +22,6 @@ Each profile is an INDEPENDENT authorization with its own refresh token, so
 refreshing one never affects another. A single profile's authorization can also
 reach several organisations (see `connections`); `tenant_id` picks the active one
 and `switch_tenant()` changes it without re-authorizing.
-
-Legacy flat stores (a single token set at the top level, no "profiles" key) are
-migrated in place on load: the old token set becomes one profile, named "demo" if
-its tenant looks like the Demo Company, otherwise "default".
 """
 
 import base64
@@ -73,33 +69,20 @@ def _atomic_write_json(path, data):
         raise
 
 
-def _migrate_store(raw):
-    """Return a version-2 profile store. Wraps a legacy flat store into one profile.
-
-    Returns (store, migrated) where `migrated` is True if a legacy store was upgraded.
-    """
-    if isinstance(raw, dict) and "profiles" in raw:
-        raw.setdefault("version", 2)
-        raw.setdefault("active", next(iter(raw["profiles"]), None))
-        return raw, False
-    # Legacy flat store: one token set at the top level.
-    name = "demo" if "demo" in (raw.get("tenant_name") or "").lower() else "default"
-    store = {"version": 2, "active": name, "profiles": {name: raw}}
-    return store, True
-
-
 def load_store(store_path="tokens.json"):
-    """Load and migrate the token store. Persists the migration if one happened."""
+    """Load the version-2 profile token store."""
     store_path = Path(store_path)
     if not store_path.exists():
         raise XeroError(
             f"Token store {store_path} not found. Run authorize.py first."
         )
     with open(store_path) as f:
-        raw = json.load(f)
-    store, migrated = _migrate_store(raw)
-    if migrated:
-        _atomic_write_json(store_path, store)
+        store = json.load(f)
+    if not isinstance(store, dict) or "profiles" not in store:
+        raise XeroError(
+            f"{store_path} is not a profile store (no 'profiles' key). "
+            "Run authorize.py --profile <name> to create one."
+        )
     return store
 
 
