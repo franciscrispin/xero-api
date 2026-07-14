@@ -8,6 +8,19 @@ Built for the standard OAuth 2.0 authorization-code flow with a **Web app**, whi
 is the flow that works for every region (including Singapore, where Custom
 Connections are not available).
 
+## Why not the official Xero MCP server?
+
+Xero publishes an official MCP server, [`xeroapi/xero-mcp-server`](https://github.com/xeroapi/xero-mcp-server),
+which would otherwise be the easy path. It authenticates using **Custom Connections**,
+and Custom Connections are only available to Xero organisations in **Australia, New
+Zealand, the United Kingdom, and the United States**. Organisations in any other
+region (for example Singapore) cannot create a Custom Connection, so the official
+MCP server does not work for them.
+
+This project uses the standard **Web app** authorization-code flow instead, which is
+available in every region. You authorize once in a browser and the tokens refresh
+themselves after that.
+
 ---
 
 ## For the agent setting this up
