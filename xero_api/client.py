@@ -6,6 +6,9 @@ happens, a crash leaves you holding a dead token. So refresh() writes the store
 atomically (temp file + fsync + os.replace) the instant it has the new token,
 before any API call runs.
 
+The store lives in a user config directory, not the working directory --
+see `config_dir()` for how that path is resolved.
+
 Token store layout (tokens.json), version 2:
 
     {
@@ -46,6 +49,86 @@ class XeroError(Exception):
     pass
 
 
+# ---------- config directory resolution ----------
+#
+# Precedence, highest first:
+#   1. an explicit path passed in (the CLI's --store / --env flags)
+#   2. $XERO_HOME
+#   3. $XDG_CONFIG_HOME/xero-api, else ~/.config/xero-api
+#
+# There is deliberately NO fallback to a file in the current working directory: a
+# stale tokens.json in some checkout silently shadowing the real credentials is a
+# genuinely confusing bug, so a missing store is an error that names `xero auth`.
+
+APP_DIR_NAME = "xero-api"
+STORE_FILENAME = "tokens.json"
+ENV_FILENAME = ".env"
+
+
+def config_dir():
+    """The directory holding .env and tokens.json. Not created by this call."""
+    home = os.environ.get("XERO_HOME")
+    if home:
+        return Path(home).expanduser()
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    base = Path(xdg).expanduser() if xdg else Path.home() / ".config"
+    return base / APP_DIR_NAME
+
+
+def ensure_dir_0700(path):
+    """Create `path` (and parents) if absent and force it to 0700.
+
+    mkdir(mode=...) is masked by the umask, so chmod explicitly: this directory
+    holds a client secret and a refresh token and must not be group/world readable.
+    """
+    path = Path(path)
+    path.mkdir(parents=True, exist_ok=True)
+    os.chmod(path, 0o700)
+    return path
+
+
+def ensure_config_dir():
+    """Create the config directory 0700 if absent, and return it."""
+    return ensure_dir_0700(config_dir())
+
+
+def default_store_path():
+    return config_dir() / STORE_FILENAME
+
+
+def default_env_path():
+    return config_dir() / ENV_FILENAME
+
+
+def resolve_store_path(store_path=None):
+    return Path(store_path).expanduser() if store_path else default_store_path()
+
+
+def resolve_env_path(env_path=None):
+    return Path(env_path).expanduser() if env_path else default_env_path()
+
+
+def load_credentials(env_path=None):
+    """Load XERO_CLIENT_ID / XERO_CLIENT_SECRET from the .env file.
+
+    Values already present in the real environment win, so a caller can export
+    them instead of keeping a .env at all.
+    """
+    path = resolve_env_path(env_path)
+    if path.exists():
+        load_dotenv(path)
+    client_id = os.environ.get("XERO_CLIENT_ID")
+    client_secret = os.environ.get("XERO_CLIENT_SECRET")
+    if not client_id or not client_secret:
+        raise XeroError(
+            "XERO_CLIENT_ID / XERO_CLIENT_SECRET not found in the environment or "
+            f"{path}.\n"
+            f"Create {path} with those two values (see .env.example in the repo), "
+            "or export them, then run: xero auth --profile <name>"
+        )
+    return client_id, client_secret
+
+
 # ---------- token store helpers (module-level, shared by client + CLI) ----------
 
 
@@ -69,25 +152,27 @@ def _atomic_write_json(path, data):
         raise
 
 
-def load_store(store_path="tokens.json"):
+def load_store(store_path=None):
     """Load the version-2 profile token store."""
-    store_path = Path(store_path)
+    store_path = resolve_store_path(store_path)
     if not store_path.exists():
         raise XeroError(
-            f"Token store {store_path} not found. Run authorize.py first."
+            f"No Xero token store at {store_path}.\n"
+            "Authorize first:  xero auth --profile <name>\n"
+            "(Set XERO_HOME or pass --store if your store lives elsewhere.)"
         )
     with open(store_path) as f:
         store = json.load(f)
     if not isinstance(store, dict) or "profiles" not in store:
         raise XeroError(
             f"{store_path} is not a profile store (no 'profiles' key). "
-            "Run authorize.py --profile <name> to create one."
+            "Run 'xero auth --profile <name>' to create one."
         )
     return store
 
 
-def save_store(store, store_path="tokens.json"):
-    _atomic_write_json(store_path, store)
+def save_store(store, store_path=None):
+    _atomic_write_json(resolve_store_path(store_path), store)
 
 
 def list_profiles(store):
@@ -100,24 +185,28 @@ def list_profiles(store):
 
 
 class XeroClient:
-    def __init__(self, env_path=".env", store_path="tokens.json", profile=None):
-        load_dotenv(env_path)
-        self.client_id = os.environ.get("XERO_CLIENT_ID")
-        self.client_secret = os.environ.get("XERO_CLIENT_SECRET")
-        if not self.client_id or not self.client_secret:
-            raise XeroError("XERO_CLIENT_ID / XERO_CLIENT_SECRET missing from .env")
-        self.store_path = Path(store_path)
+    def __init__(self, profile=None, env_path=None, store_path=None):
+        """Open a Xero connection using stored credentials.
+
+        profile     -- named authorization to use; defaults to the store's active one
+        env_path    -- override the .env location (default: config_dir()/.env)
+        store_path  -- override the token store (default: config_dir()/tokens.json)
+        """
+        self.client_id, self.client_secret = load_credentials(env_path)
+        self.store_path = resolve_store_path(store_path)
         self.store = load_store(self.store_path)
 
         profiles = self.store.get("profiles", {})
         if not profiles:
-            raise XeroError("No profiles in token store. Run authorize.py first.")
+            raise XeroError(
+                f"No profiles in {self.store_path}. Run: xero auth --profile <name>"
+            )
         self.profile = profile or self.store.get("active") or next(iter(profiles))
         if self.profile not in profiles:
             available = ", ".join(profiles) or "(none)"
             raise XeroError(
                 f"Profile '{self.profile}' not found. Available: {available}. "
-                "Run authorize.py --profile <name> to add it."
+                "Run 'xero auth --profile <name>' to add it."
             )
 
     # ---------- active profile ----------
@@ -170,7 +259,8 @@ class XeroClient:
         rt = self.prof.get("refresh_token")
         if not rt:
             raise XeroError(
-                f"No refresh_token in profile '{self.profile}'. Run authorize.py again."
+                f"No refresh_token in profile '{self.profile}'. "
+                f"Run 'xero auth --profile {self.profile}' again."
             )
 
         resp = requests.post(
@@ -188,7 +278,7 @@ class XeroClient:
             raise XeroError(
                 f"Refresh failed ({resp.status_code}): {resp.text}\n"
                 "If this is 'invalid_grant', the refresh token is dead "
-                "(unused >60 days, revoked, or a rotation was lost). Run authorize.py again."
+                "(unused >60 days, revoked, or a rotation was lost). Run 'xero auth' again."
             )
 
         tok = resp.json()
@@ -219,7 +309,7 @@ class XeroClient:
         token = self.ensure_token()
         tenant = self.prof.get("tenant_id")
         if not tenant:
-            raise XeroError("No tenant_id in profile. Run authorize.py first.")
+            raise XeroError("No tenant_id in profile. Run 'xero auth' first.")
         url = path if path.startswith("http") else f"{API_BASE}/{path.lstrip('/')}"
 
         attempts = 0
@@ -251,7 +341,7 @@ class XeroClient:
         token = self.ensure_token()
         tenant = self.prof.get("tenant_id")
         if not tenant:
-            raise XeroError("No tenant_id in profile. Run authorize.py first.")
+            raise XeroError("No tenant_id in profile. Run 'xero auth' first.")
         url = path if path.startswith("http") else f"{API_BASE}/{path.lstrip('/')}"
 
         attempts = 0

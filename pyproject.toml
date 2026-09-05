@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "xero-api"
+version = "2.0.0"
+description = "Xero OAuth 2.0 API client: a `xero` CLI and an importable Python library."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+dependencies = [
+    "requests>=2.31",
+    "python-dotenv>=1.0",
+]
+
+[project.scripts]
+xero = "xero_api.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/franciscrispin/xero-api"
+
+[tool.setuptools]
+packages = ["xero_api"]
+
+# scopes.txt is data, not code: authorize resolves it relative to the package, so it
+# must be installed alongside the modules or scope validation breaks after install.
+[tool.setuptools.package-data]
+xero_api = ["scopes.txt"]

@@ -1,26 +1,25 @@
 """One-time browser authorization for a Xero Web app (standard auth code flow).
 
-Scopes are chosen at run time, not hardcoded. Pass them with --scopes:
+Drives the `xero auth` subcommand. Scopes are chosen at run time, not hardcoded:
 
-    python authorize.py --scopes accounting.invoices.read accounting.contacts.read
-    python authorize.py --scopes "accounting.invoices accounting.invoices.read"
-
-Or request everything in one go:
-
-    python authorize.py --all-scopes
+    xero auth --scopes accounting.invoices.read accounting.contacts.read
+    xero auth --scopes "accounting.invoices accounting.invoices.read"
+    xero auth --profile real --all-scopes
 
 offline_access is added automatically (mandatory for a refresh token). Valid scope
-strings are validated against scopes.txt. With no --scopes, a read-only accounting
-default is used. --all-scopes requests every scope in scopes.txt except those in
-EXCLUDED_FROM_ALL (see the comment there — Xero rejects some scopes outright for
-this flow, regardless of what else is requested alongside them).
+strings are validated against scopes.txt, which ships as package data and is
+resolved relative to this module -- never relative to the working directory. With
+no --scopes, a read-only accounting default is used. --all-scopes requests every
+scope in scopes.txt except those in EXCLUDED_FROM_ALL (see the comment there --
+Xero rejects some scopes outright for this flow, regardless of what else is
+requested alongside them).
 
-The script opens your browser, you consent, it catches the redirect on the loopback
-port, swaps the code for tokens, fetches your tenantId, and writes tokens.json.
-Run it on a machine with a browser (i.e. your own computer, not a headless server).
+Opens your browser, you consent, it catches the redirect on the loopback port,
+swaps the code for tokens, fetches your tenantId, and writes the token store in
+the config directory. Run it on a machine with a browser (i.e. your own computer,
+not a headless server).
 """
 
-import argparse
 import base64
 import json
 import os
@@ -34,23 +33,27 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 import requests
-from dotenv import load_dotenv
 
-from xero_client import _atomic_write_json
-
-load_dotenv()  # load .env now so XERO_REDIRECT_PORT below can override the default
+from .client import (
+    _atomic_write_json,
+    ensure_dir_0700,
+    load_credentials,
+    resolve_env_path,
+    resolve_store_path,
+)
 
 AUTHORIZE_URL = "https://login.xero.com/identity/connect/authorize"
 TOKEN_URL = "https://identity.xero.com/connect/token"
 CONNECTIONS_URL = "https://api.xero.com/connections"
-STORE_PATH = "tokens.json"
-SCOPES_FILE = Path(__file__).parent / "scopes.txt"
+
+# scopes.txt is package data: resolve it next to this module, so scope validation
+# works no matter what directory `xero auth` is invoked from.
+SCOPES_FILE = Path(__file__).resolve().parent / "scopes.txt"
 
 # The loopback port for the redirect. Arbitrary, but MUST match the redirect URI
 # registered in the Xero app portal exactly. 8080 is heavily used, so default to
-# something quieter. Override with XERO_REDIRECT_PORT in .env.
-REDIRECT_PORT = int(os.environ.get("XERO_REDIRECT_PORT", "8723"))
-REDIRECT_URI = f"http://localhost:{REDIRECT_PORT}/callback"
+# something quieter. Override with XERO_REDIRECT_PORT in the environment or .env.
+DEFAULT_REDIRECT_PORT = 8723
 
 # Always allowed, even though they are not in scopes.txt.
 ALWAYS_VALID = {"offline_access", "openid", "profile", "email"}
@@ -92,15 +95,15 @@ def load_all_scopes_ordered():
     return [s for s in scopes if s not in EXCLUDED_FROM_ALL]
 
 
-# Callback success page, styled to the Agent Works deck design system
-# (warm paper, copper accent, Fraunces + Instrument Sans, 6px copper top rule).
-# Self-contained: Google Fonts load if online, with graceful serif/sans fallbacks.
+# Callback success page shown in the browser after consent. Deliberately
+# self-contained and unbranded: Google Fonts load if online, with graceful
+# serif/sans fallbacks if not.
 SUCCESS_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Xero connected · Agent Works</title>
+<title>Xero connected</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400..700;1,9..144,400..700&family=Instrument+Sans:ital,wght@0,400..700;1,400..700&display=swap" rel="stylesheet">
@@ -158,8 +161,8 @@ p.lead{color:var(--muted);font-size:19px;line-height:1.55;margin-top:18px;}
   </div>
   <h1>You're <span class="accent">connected</span>.</h1>
   <p class="lead">Xero authorization received. You can close this tab and return to the terminal.</p>
-  <div class="hint">The setup script is finishing in your terminal.</div>
-  <div class="foot">Agent Works</div>
+  <div class="hint">xero auth is finishing in your terminal.</div>
+  <div class="foot">xero-api</div>
 </main>
 </body>
 </html>"""
@@ -191,9 +194,9 @@ def _basic_auth(client_id, client_secret):
     return "Basic " + base64.b64encode(raw).decode()
 
 
-def _load_store_or_empty():
+def _load_store_or_empty(path):
     """Return the existing multi-profile store, or a fresh empty one."""
-    path = Path(STORE_PATH)
+    path = Path(path)
     if not path.exists():
         return {"version": 2, "active": None, "profiles": {}}
     with open(path) as f:
@@ -238,46 +241,21 @@ def resolve_scopes(raw_scopes, catalog):
     return result
 
 
-def main():
-    parser = argparse.ArgumentParser(description="One-time Xero authorization.")
-    scope_group = parser.add_mutually_exclusive_group()
-    scope_group.add_argument(
-        "--scopes",
-        nargs="+",
-        default=None,
-        help="Scopes to request (space or comma separated). See scopes.txt. "
-        "offline_access is added automatically.",
-    )
-    scope_group.add_argument(
-        "--all-scopes",
-        action="store_true",
-        help="Request every scope in scopes.txt except EXCLUDED_FROM_ALL "
-        "(currently just app.connections, which Xero rejects for this flow).",
-    )
-    parser.add_argument(
-        "--profile",
-        default=None,
-        help="Name to store this authorization under (e.g. demo, real). Existing "
-        "profiles are preserved. Defaults to 'demo' for the Demo Company, else 'real'.",
-    )
-    parser.add_argument(
-        "--tenant",
-        default=None,
-        help="Preselect the active organisation by tenantName (case-insensitive) or "
-        "tenantId, skipping the interactive prompt when the auth reaches several orgs.",
-    )
-    args = parser.parse_args()
+def run(args):
+    """Execute `xero auth`. `args` is the parsed argparse namespace from cli.py."""
+    store_path = resolve_store_path(getattr(args, "store", None))
+    env_path = resolve_env_path(getattr(args, "env", None))
+    client_id, client_secret = load_credentials(env_path)
 
-    client_id = os.environ.get("XERO_CLIENT_ID")
-    client_secret = os.environ.get("XERO_CLIENT_SECRET")
-    if not client_id or not client_secret:
-        sys.exit("XERO_CLIENT_ID / XERO_CLIENT_SECRET missing. Copy .env.example to .env and fill it in.")
+    # XERO_REDIRECT_PORT may live in .env, which load_credentials() has now loaded.
+    redirect_port = int(os.environ.get("XERO_REDIRECT_PORT", DEFAULT_REDIRECT_PORT))
+    redirect_uri = f"http://localhost:{redirect_port}/callback"
 
     if args.all_scopes:
         print(
             f"--all-scopes: requesting every scope in scopes.txt except "
             f"{', '.join(sorted(EXCLUDED_FROM_ALL))} (see EXCLUDED_FROM_ALL in "
-            "authorize.py for why).\n"
+            "xero_api/auth.py for why).\n"
         )
         scopes = resolve_scopes([" ".join(load_all_scopes_ordered())], load_catalog())
     else:
@@ -291,7 +269,7 @@ def main():
     params = {
         "response_type": "code",
         "client_id": client_id,
-        "redirect_uri": REDIRECT_URI,
+        "redirect_uri": redirect_uri,
         "scope": " ".join(scopes),
         "state": state,
     }
@@ -304,14 +282,14 @@ def main():
     # Wait for the single redirect back to the loopback callback.
     HTTPServer.allow_reuse_address = True  # avoid TIME_WAIT errors on repeated runs
     try:
-        server = HTTPServer(("localhost", REDIRECT_PORT), _CallbackHandler)
+        server = HTTPServer(("localhost", redirect_port), _CallbackHandler)
     except OSError as e:
         sys.exit(
-            f"Could not bind port {REDIRECT_PORT}: {e}\n"
-            "Something else is using it. Set XERO_REDIRECT_PORT in .env to a free port, "
+            f"Could not bind port {redirect_port}: {e}\n"
+            "Something else is using it. Set XERO_REDIRECT_PORT to a free port, "
             "and add the matching redirect URI in the Xero app portal."
         )
-    print(f"Waiting for the redirect on {REDIRECT_URI} ...")
+    print(f"Waiting for the redirect on {redirect_uri} ...")
     server.handle_request()
     result = _CallbackHandler.result
 
@@ -346,7 +324,7 @@ def main():
         data={
             "grant_type": "authorization_code",
             "code": code,
-            "redirect_uri": REDIRECT_URI,
+            "redirect_uri": redirect_uri,
         },
         timeout=30,
     )
@@ -384,7 +362,7 @@ def main():
     # Choose the active tenant for this profile. If the user named the profile
     # 'real' (or anything non-demo), prefer a real org; otherwise prefer the Demo
     # Company for safe first testing. The user can still switch later without
-    # re-authorizing (xero_profiles.py tenant ...).
+    # re-authorizing (xero profiles tenant ...).
     demo = next((c for c in connections if "demo" in (c.get("tenantName") or "").lower()), None)
     real = next((c for c in connections if c is not demo), None)
     prefer_real = args.profile is not None and args.profile.lower() != "demo"
@@ -426,21 +404,18 @@ def main():
     profile_name = args.profile or _default_profile_name(chosen)
 
     # Merge into the existing store, preserving other profiles, and activate this one.
-    store = _load_store_or_empty()
+    ensure_dir_0700(store_path.parent)
+    store = _load_store_or_empty(store_path)
     existed = profile_name in store["profiles"]
     store["profiles"][profile_name] = profile
     store["active"] = profile_name
-    _atomic_write_json(STORE_PATH, store)
+    _atomic_write_json(store_path, store)
 
     verb = "Updated" if existed else "Added"
-    print(f"\n{verb} profile '{profile_name}' in {STORE_PATH} and set it active.")
+    print(f"\n{verb} profile '{profile_name}' in {store_path} and set it active.")
     print(f"Active tenant: {profile['tenant_name']} ({profile['tenant_id']}).")
     others = [p for p in store["profiles"] if p != profile_name]
     if others:
         print(f"Other saved profiles (preserved): {', '.join(others)}.")
-        print("Switch anytime with:  python xero_profiles.py use <name>")
-    print(f"Next: python demo.py --profile {profile_name}")
-
-
-if __name__ == "__main__":
-    main()
+        print("Switch anytime with:  xero profiles use <name>")
+    print(f"Next: xero get Organisation --profile {profile_name}")
