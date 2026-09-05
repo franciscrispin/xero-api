@@ -1,7 +1,7 @@
-# Xero OAuth 2.0 scope catalog (source of truth used by authorize.py to validate --scopes).
+# Xero OAuth 2.0 scope catalog (source of truth used by `xero auth` to validate --scopes).
 # One scope per line. Lines starting with # are comments/section headers.
 # A ".read" scope is read-only (GET). The same scope without ".read" is read + write.
-# offline_access is added automatically by authorize.py (mandatory for a refresh token)
+# offline_access is added automatically by `xero auth` (mandatory for a refresh token)
 # and is intentionally NOT listed here.
 #
 # Full reference: https://developer.xero.com/documentation/guides/oauth2/scopes/
@@ -9,7 +9,7 @@
 # --- Connections (non-tenanted) ---
 # NOTE: Xero's authorize endpoint rejects app.connections outright for this app
 # (access_denied: "Requested wrong apps scopes"), even requested alone. It's excluded
-# from authorize.py --all-scopes -- see EXCLUDED_FROM_ALL in authorize.py.
+# from `xero auth --all-scopes` -- see EXCLUDED_FROM_ALL in xero_api/auth.py.
 app.connections
 
 # --- Accounting: settings, contacts, attachments, budgets ---
