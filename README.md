@@ -10,6 +10,7 @@ is the flow that works for every region (including Singapore, where Custom
 Connections are not available).
 
 ```bash
+python3 -m venv .venv && source .venv/bin/activate
 pip install -e .
 xero auth --profile real --all-scopes
 xero get Contacts --where 'Name=="Acme Ltd"' | jq '.Contacts[].ContactID'
@@ -37,6 +38,19 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .          # installs the `xero` command and the `xero_api` package
 ```
+
+Or, with [uv](https://docs.astral.sh/uv/):
+
+```bash
+uv venv
+source .venv/bin/activate
+uv pip install -e .
+```
+
+Install into a virtual environment either way. A system Python installed by
+Homebrew refuses a bare `pip install -e .` with `externally-managed-environment`
+(PEP 668), and on many such setups `pip` is not on `PATH` at all — activating the
+venv first avoids both.
 
 Both work from any directory afterwards:
 
@@ -301,9 +315,9 @@ Then:
 ### Step 3 — Set up the environment [agent]
 
 ```bash
-python3 -m venv .venv
+python3 -m venv .venv       # or: uv venv
 source .venv/bin/activate
-pip install -e .
+pip install -e .            # or: uv pip install -e .
 
 mkdir -p ~/.config/xero-api && chmod 700 ~/.config/xero-api
 cp .env.example ~/.config/xero-api/.env && chmod 600 ~/.config/xero-api/.env
