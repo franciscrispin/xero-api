@@ -13,3 +13,9 @@ venv/
 *.egg-info/
 build/
 dist/
+
+# Local uv lockfile. Deliberately not committed: this is a library as well as a
+# CLI, and venv+pip is the documented default, so a lock would govern only one of
+# two supported install paths. Dependency floors in pyproject.toml are the source
+# of truth. (`uv pip install -e .` does not read or write this; only `uv sync`.)
+uv.lock
