@@ -368,3 +368,52 @@ class XeroClient:
             if resp.status_code >= 400:
                 raise XeroError(f"POST {url} failed ({resp.status_code}): {resp.text}")
             return resp.json()
+
+    def upload(self, path, data, content_type="application/octet-stream", params=None,
+               method="PUT"):
+        """Upload a raw binary body -- Xero's attachment endpoints, in practice.
+
+        `path` carries the file name as its last segment and `data` is the file's
+        bytes, e.g.
+
+            client.upload(f"Invoices/{invoice_id}/Attachments/{quote(name)}",
+                          pdf_bytes, "application/pdf",
+                          params={"IncludeOnline": "true"})
+
+        PUT creates a new attachment; POST replaces one that already has that file
+        name. Same 401/429 handling as get().
+        """
+        if method not in ("PUT", "POST"):
+            raise XeroError(f"upload() takes PUT or POST, not {method}")
+        token = self.ensure_token()
+        tenant = self.prof.get("tenant_id")
+        if not tenant:
+            raise XeroError("No tenant_id in profile. Run 'xero auth' first.")
+        url = path if path.startswith("http") else f"{API_BASE}/{path.lstrip('/')}"
+
+        attempts = 0
+        while True:
+            attempts += 1
+            resp = requests.request(
+                method,
+                url,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Xero-tenant-id": tenant,
+                    "Accept": "application/json",
+                    "Content-Type": content_type,
+                },
+                params=params,
+                data=data,
+                timeout=60,
+            )
+            if resp.status_code == 401 and attempts == 1:
+                token = self.refresh()
+                continue
+            if resp.status_code == 429 and attempts <= 2:
+                retry_after = int(resp.headers.get("Retry-After", "5"))
+                time.sleep(retry_after + 1)
+                continue
+            if resp.status_code >= 400:
+                raise XeroError(f"{method} {url} failed ({resp.status_code}): {resp.text}")
+            return resp.json()

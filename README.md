@@ -205,6 +205,11 @@ new_inv = client.post("Invoices", {            # POST/create (needs a write scop
     }],
 })
 
+with open("summary.pdf", "rb") as fh:          # raw binary body — attachments
+    client.upload(f"Invoices/{invoice_id}/Attachments/{quote(name)}", fh.read(),
+                  content_type="application/pdf",
+                  params={"IncludeOnline": "true"})
+
 client.switch_tenant("Acme Ltd")               # repoint this profile at another
                                                # connected org (persisted, no re-auth)
 ```
@@ -213,8 +218,13 @@ The constructor signature is `XeroClient(profile=None, env_path=None, store_path
 All three are optional; the defaults resolve through the config directory described
 above.
 
-`client.get(...)` / `client.post(...)` refresh only when needed and **persist the
-rotated refresh token to disk before making the API call**. You never handle tokens
+`client.upload(path, data, content_type=…, params=None, method="PUT")` sends a raw
+binary body, which is what Xero's attachment endpoints take: the file name is the
+last path segment, `PUT` creates a new attachment and `POST` replaces one with the
+same name. Needs the `accounting.attachments` scope.
+
+`client.get(...)` / `client.post(...)` / `client.upload(...)` refresh only when needed
+and **persist the rotated refresh token to disk before making the API call**. You never handle tokens
 by hand. `client.prof` is the active profile's dict (e.g. `client.prof["tenant_name"]`),
 and failures raise `xero_api.XeroError`.
 
@@ -368,6 +378,7 @@ Rules:
 | Read GST / tax reports | `accounting.reports.taxreports.read` |
 | Read budgets | `accounting.budgets.read` |
 | Read file attachments | `accounting.attachments.read` |
+| Read **and upload** file attachments (`client.upload`) | `accounting.attachments.read accounting.attachments` |
 | Payroll (employees, payruns, timesheets) | `payroll.employees.read payroll.payruns.read payroll.timesheets.read` |
 | Files library | `files.read` |
 | Fixed assets | `assets.read` |
