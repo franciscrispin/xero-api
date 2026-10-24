@@ -205,6 +205,12 @@ new_inv = client.post("Invoices", {            # POST/create (needs a write scop
     }],
 })
 
+payment = client.create_payment(               # PUT Payments (needs accounting.payments)
+    "INV-0001", "090", 1500.00, "2026-11-02",   # invoice number, bank account code,
+    reference="INV-0001 DEPOSIT",               # amount, date
+    idempotency_key="my-app-payment-42",        # a retry can never pay twice
+)
+
 with open("summary.pdf", "rb") as fh:          # raw binary body — attachments
     client.upload(f"Invoices/{invoice_id}/Attachments/{quote(name)}", fh.read(),
                   content_type="application/pdf",
@@ -223,13 +229,32 @@ binary body, which is what Xero's attachment endpoints take: the file name is th
 last path segment, `PUT` creates a new attachment and `POST` replaces one with the
 same name. Needs the `accounting.attachments` scope.
 
-`client.get(...)` / `client.post(...)` / `client.upload(...)` refresh only when needed
+`client.put(path, body)` is `post()` for the create endpoints Xero documents as PUT.
+Both take `idempotency_key=`, sent as Xero's `Idempotency-Key` header (128 characters
+at most): Xero answers a repeated key with the first response instead of writing
+again, so a caller retrying after a timeout cannot create the same thing twice.
+
+`client.create_payment(invoice, account, amount, date, reference=None,
+idempotency_key=None)` records a payment against an invoice. `invoice` is the
+invoice number, or a dict such as `{"InvoiceID": ...}`; `account` is the bank
+account's code, or `{"AccountID": ...}`; `date` is a `datetime.date` or
+`"YYYY-MM-DD"`. It returns the created payment, and raises `XeroError` with Xero's
+reason when Xero refuses it (a DRAFT invoice, more than the amount due). Needs the
+`accounting.payments` scope.
+
+`client.get(...)` / `client.post(...)` / `client.put(...)` / `client.upload(...)` refresh only when needed
 and **persist the rotated refresh token to disk before making the API call**. You never handle tokens
 by hand. `client.prof` is the active profile's dict (e.g. `client.prof["tenant_name"]`),
 and failures raise `xero_api.XeroError`.
 
 Also exported: `config_dir()`, `default_env_path()`, `default_store_path()`,
 `load_store()`, `save_store()`, `list_profiles()`.
+
+Tests (no network; `requests` is faked and the credentials are throwaway files):
+
+```bash
+uv run --no-project --with pytest --with requests --with python-dotenv --with-editable . pytest tests
+```
 
 ---
 

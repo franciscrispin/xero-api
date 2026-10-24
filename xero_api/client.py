@@ -336,25 +336,43 @@ class XeroClient:
                 raise XeroError(f"GET {url} failed ({resp.status_code}): {resp.text}")
             return resp.json() if "json" in accept else resp.text
 
-    def post(self, path, json_body):
-        """POST/create against a Xero endpoint. Same 401/429 handling as get()."""
+    def post(self, path, json_body, idempotency_key=None):
+        """POST/create against a Xero endpoint. Same 401/429 handling as get().
+
+        `idempotency_key` is sent as Xero's `Idempotency-Key` header: Xero answers a
+        repeat of the same key with the first response instead of writing again, so a
+        caller that retries after a timeout cannot create the thing twice.
+        """
+        return self._write("POST", path, json_body, idempotency_key)
+
+    def put(self, path, json_body, idempotency_key=None):
+        """PUT/create against a Xero endpoint (several create endpoints, Payments
+        among them, are documented as PUT). Same handling as post()."""
+        return self._write("PUT", path, json_body, idempotency_key)
+
+    def _write(self, method, path, json_body, idempotency_key=None):
         token = self.ensure_token()
         tenant = self.prof.get("tenant_id")
         if not tenant:
             raise XeroError("No tenant_id in profile. Run 'xero auth' first.")
         url = path if path.startswith("http") else f"{API_BASE}/{path.lstrip('/')}"
+        headers = {
+            "Xero-tenant-id": tenant,
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        }
+        if idempotency_key:
+            if len(idempotency_key) > 128:
+                raise XeroError("Idempotency-Key is limited to 128 characters")
+            headers["Idempotency-Key"] = idempotency_key
 
         attempts = 0
         while True:
             attempts += 1
-            resp = requests.post(
+            resp = requests.request(
+                method,
                 url,
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "Xero-tenant-id": tenant,
-                    "Accept": "application/json",
-                    "Content-Type": "application/json",
-                },
+                headers={"Authorization": f"Bearer {token}", **headers},
                 json=json_body,
                 timeout=30,
             )
@@ -366,8 +384,43 @@ class XeroClient:
                 time.sleep(retry_after + 1)
                 continue
             if resp.status_code >= 400:
-                raise XeroError(f"POST {url} failed ({resp.status_code}): {resp.text}")
+                raise XeroError(f"{method} {url} failed ({resp.status_code}): {resp.text}")
             return resp.json()
+
+    def create_payment(self, invoice, account, amount, date, reference=None,
+                       idempotency_key=None):
+        """Record a payment against an invoice (PUT Payments). Needs a write scope
+        that covers payments (`accounting.payments`).
+
+        invoice    -- the invoice's number (a str), or a dict such as {"InvoiceID": ...}
+        account    -- the bank account's code (a str), or a dict such as {"AccountID": ...}
+        amount     -- the amount paid, in the invoice's currency
+        date       -- the payment date, a datetime.date or "YYYY-MM-DD"
+        reference  -- optional text shown on the payment and used by bank reconciliation
+        idempotency_key -- optional; see post()
+
+        Xero refuses a payment on a DRAFT invoice or one larger than the amount due,
+        and says why in the XeroError. Returns the created payment (a dict with
+        PaymentID, Amount, Reference, Invoice, Account, ...).
+        """
+        if isinstance(amount, bool) or not isinstance(amount, (int, float)) or amount <= 0:
+            raise XeroError(f"amount must be a positive number, got {amount!r}")
+        payment = {
+            "Invoice": invoice if isinstance(invoice, dict) else {"InvoiceNumber": str(invoice)},
+            "Account": account if isinstance(account, dict) else {"Code": str(account)},
+            "Date": date if isinstance(date, str) else date.isoformat(),
+            "Amount": amount,
+        }
+        if reference:
+            payment["Reference"] = reference
+        resp = self.put("Payments", {"Payments": [payment]}, idempotency_key=idempotency_key)
+        created = (resp or {}).get("Payments") or []
+        if not created:
+            raise XeroError(f"PUT Payments returned no payment: {resp!r}")
+        errors = created[0].get("ValidationErrors") or []
+        if errors:
+            raise XeroError("Xero refused the payment: " + "; ".join(e.get("Message", "?") for e in errors))
+        return created[0]
 
     def upload(self, path, data, content_type="application/octet-stream", params=None,
                method="PUT"):
