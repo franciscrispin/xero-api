@@ -385,6 +385,11 @@ class XeroClient:
                 continue
             if resp.status_code >= 400:
                 raise XeroError(f"{method} {url} failed ({resp.status_code}): {resp.text}")
+            # Some endpoints answer a success with no body at all -- emailing an
+            # invoice (POST Invoices/{id}/Email) returns 204 No Content. Parsing
+            # that as JSON raises, which makes a send that worked look like a crash.
+            if resp.status_code == 204 or not resp.content.strip():
+                return {}
             return resp.json()
 
     def create_payment(self, invoice, account, amount, date, reference=None,
