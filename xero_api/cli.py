@@ -124,6 +124,21 @@ def cmd_get(args):
 
     if args.where:
         params["where"] = args.where
+
+    if args.out:
+        # A file body (an attachment) must never be decoded to str on the way
+        # through: a PDF that goes through resp.text comes out unopenable.
+        data = client.download(
+            args.endpoint, params=params or None, accept=args.accept
+        )
+        try:
+            with open(args.out, "wb") as f:
+                f.write(data)
+        except OSError as e:
+            sys.exit(f"Could not write {args.out}: {e}")
+        print(f"{len(data)} bytes -> {args.out}")
+        return
+
     _emit(client.get(args.endpoint, params=params or None))
 
 
@@ -228,6 +243,7 @@ def build_parser():
             "  xero get Organisation\n"
             "  xero get Contacts --where 'Name==\"Acme Ltd\"'\n"
             "  xero get Invoices --params page=1 --params pageSize=5 | jq '.Invoices[].InvoiceNumber'\n"
+            "  xero get 'Invoices/<id>/Attachments/Summary.pdf' --accept application/pdf --out s.pdf\n"
             "  xero get --list-items",
             formatter_class=argparse.RawDescriptionHelpFormatter,
         )
@@ -246,6 +262,19 @@ def build_parser():
         default=[],
         metavar="K=V",
         help="Extra query parameter; repeatable.",
+    )
+    p_get.add_argument(
+        "--out",
+        default=None,
+        metavar="PATH",
+        help="Write the response body to this file as raw bytes instead of printing "
+        "it. For endpoints that answer with a file, e.g. an attachment.",
+    )
+    p_get.add_argument(
+        "--accept",
+        default="application/octet-stream",
+        help="Accept header to send with --out (default: application/octet-stream). "
+        "Ignored without --out.",
     )
     p_get.add_argument(
         "--list-items", action="store_true", help="Convenience: list item codes and prices."

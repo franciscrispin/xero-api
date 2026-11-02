@@ -20,6 +20,9 @@ class FakeResponse:
         self._body = body
         self.headers = headers or {}
         self.text = json.dumps(body)
+        # `content` as well as `text`: _write() checks it to tell an empty success
+        # (a 204 from emailing an invoice) from a JSON body.
+        self.content = self.text.encode()
 
     def json(self):
         return self._body

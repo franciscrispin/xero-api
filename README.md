@@ -142,6 +142,21 @@ xero get --list-items             # code, unit price, name
 xero get --list-branding-themes   # BrandingThemeID, name
 ```
 
+#### Bodies that are files, not JSON
+
+`--out` writes the response to a file as raw bytes, for the endpoints that answer with
+a document. Attachments are the case in practice:
+
+```bash
+xero get 'Invoices/9c8e…-uuid/Attachments/Terms%20of%20service.pdf' \
+    --accept application/pdf --out terms.pdf
+```
+
+Use it for anything that isn't text. Without `--out` the body is decoded to `str`,
+which silently corrupts a binary one: the saved PDF won't open. `--accept` sets the
+request's Accept header and only applies with `--out`. `client.download()` is the same
+thing from Python, returning `bytes`.
+
 ### `xero post` — write
 
 ```bash

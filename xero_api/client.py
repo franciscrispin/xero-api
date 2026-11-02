@@ -305,7 +305,28 @@ class XeroClient:
 
         Handles: 401 -> one refresh + retry; 429 -> respect Retry-After, retry once.
         Per-tenant limits: 60 calls/min, 5,000/day.
+
+        Returns parsed JSON, or text for any other Accept. Use download() for a
+        binary body: decoding one to str corrupts it.
         """
+        resp = self._get(path, params=params, accept=accept)
+        return resp.json() if "json" in accept else resp.text
+
+    def download(self, path, params=None, accept="application/octet-stream"):
+        """GET a Xero endpoint and return the response body as bytes.
+
+        For the endpoints that answer with a file rather than JSON, attachments
+        above all:
+
+            pdf = client.download(f"Invoices/{invoice_id}/Attachments/{quote(name)}",
+                                  accept="application/pdf")
+
+        Same 401/429 handling as get(), and like get() it only ever reads.
+        """
+        return self._get(path, params=params, accept=accept).content
+
+    def _get(self, path, params=None, accept="application/json"):
+        """The shared GET, returning the response itself so callers decide on decoding."""
         token = self.ensure_token()
         tenant = self.prof.get("tenant_id")
         if not tenant:
@@ -334,7 +355,7 @@ class XeroClient:
                 continue
             if resp.status_code >= 400:
                 raise XeroError(f"GET {url} failed ({resp.status_code}): {resp.text}")
-            return resp.json() if "json" in accept else resp.text
+            return resp
 
     def post(self, path, json_body, idempotency_key=None):
         """POST/create against a Xero endpoint. Same 401/429 handling as get().
