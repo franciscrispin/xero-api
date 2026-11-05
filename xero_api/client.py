@@ -21,6 +21,14 @@ Token store layout (tokens.json), version 2:
       }
     }
 
+Several processes share one store (the CLI, scripts, long-running services), and
+Xero rotates the refresh token on every refresh. So every write to the store is a
+read-modify-write under an exclusive lock on a sibling `tokens.json.lock` file:
+re-read the store from disk, change only this profile's fields, write atomically.
+refresh() holds that lock across the token request too, and first checks whether
+another process has already refreshed (a different refresh token on disk with a
+still-valid access token), adopting that instead of spending a consumed token.
+
 Each profile is an INDEPENDENT authorization with its own refresh token, so
 refreshing one never affects another. A single profile's authorization can also
 reach several organisations (see `connections`); `tenant_id` picks the active one
@@ -28,11 +36,17 @@ and `switch_tenant()` changes it without re-authorizing.
 """
 
 import base64
+import contextlib
 import json
 import os
 import tempfile
 import time
 from pathlib import Path
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows: no flock, fall back to no lock
+    fcntl = None
 
 import requests
 from dotenv import load_dotenv
@@ -43,6 +57,10 @@ API_BASE = "https://api.xero.com/api.xro/2.0"
 
 # Refresh proactively if the access token expires within this many seconds.
 EXPIRY_BUFFER = 120
+
+# The fields refresh() owns. Only these move between disk and memory when tokens
+# are adopted or saved, so a refresh never undoes another process's tenant switch.
+TOKEN_FIELDS = ("access_token", "refresh_token", "expires_at", "scope")
 
 
 class XeroError(Exception):
@@ -172,7 +190,48 @@ def load_store(store_path=None):
 
 
 def save_store(store, store_path=None):
-    _atomic_write_json(resolve_store_path(store_path), store)
+    """Write a whole store. Prefer update_store(): this overwrites whatever another
+    process wrote since `store` was read."""
+    with store_lock(store_path):
+        _atomic_write_json(resolve_store_path(store_path), store)
+
+
+def lock_path(store_path=None):
+    store_path = resolve_store_path(store_path)
+    return store_path.with_name(store_path.name + ".lock")
+
+
+@contextlib.contextmanager
+def store_lock(store_path=None):
+    """Hold an exclusive lock on the store, across processes.
+
+    The lock is flock() on a sibling `<store>.lock` file, never on tokens.json
+    itself, because tokens.json is replaced (os.replace) by every write and a lock
+    on the old inode would protect nothing. flock locks belong to the open file, so
+    two clients in one process exclude each other too; do not nest this.
+    """
+    path = lock_path(store_path)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        if fcntl is not None:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)  # closing releases the flock
+
+
+def update_store(fn, store_path=None):
+    """Read-modify-write the store under the lock: fn(store) mutates it in place.
+
+    The store is re-read from disk inside the lock, so a change made by another
+    process since this one last looked is never overwritten. Returns the store as
+    written.
+    """
+    with store_lock(store_path):
+        store = load_store(store_path)
+        fn(store)
+        _atomic_write_json(resolve_store_path(store_path), store)
+        return store
 
 
 def list_profiles(store):
@@ -216,8 +275,30 @@ class XeroClient:
         """The active profile's token dict (mutated in place, persisted on save)."""
         return self.store["profiles"][self.profile]
 
-    def _save_store(self):
-        _atomic_write_json(self.store_path, self.store)
+    def _save_store(self, fields=None):
+        """Persist this profile into the store ON DISK, merging rather than
+        overwriting: re-read under the lock, copy in only `fields` of this profile
+        (all of it when None), write atomically. Other profiles and the active
+        pointer stay exactly as some other process may have left them."""
+        def merge(store):
+            profiles = store.setdefault("profiles", {})
+            if fields is None or self.profile not in profiles:
+                profiles[self.profile] = dict(self.prof)
+            else:
+                for k in fields:
+                    if k in self.prof:
+                        profiles[self.profile][k] = self.prof[k]
+        update_store(merge, self.store_path)
+
+    @staticmethod
+    def _access_valid(prof, now=None):
+        now = time.time() if now is None else now
+        return bool(prof.get("access_token")) and now < prof.get("expires_at", 0)
+
+    def _adopt_tokens(self, disk_prof):
+        for k in TOKEN_FIELDS:
+            if k in disk_prof:
+                self.prof[k] = disk_prof[k]
 
     def switch_tenant(self, tenant):
         """Point this profile at another organisation it is already connected to.
@@ -239,7 +320,7 @@ class XeroClient:
             )
         self.prof["tenant_id"] = match["tenantId"]
         self.prof["tenant_name"] = match.get("tenantName")
-        self._save_store()
+        self._save_store(fields=("tenant_id", "tenant_name"))
         return match
 
     # ---------- auth ----------
@@ -255,48 +336,82 @@ class XeroClient:
         Order matters: get new tokens -> write them to disk -> only then return.
         Nothing (no API call) happens between receiving and persisting the new
         refresh token.
+
+        Safe with other processes on the same store: the whole thing runs under the
+        store lock, starting from the store as it is on disk now. If another process
+        has already rotated this profile's refresh token and its access token is
+        still valid, that is adopted and no refresh is made; otherwise the refresh
+        uses the on-disk refresh token, never a stale in-memory one.
         """
-        rt = self.prof.get("refresh_token")
-        if not rt:
-            raise XeroError(
-                f"No refresh_token in profile '{self.profile}'. "
-                f"Run 'xero auth --profile {self.profile}' again."
-            )
+        with store_lock(self.store_path):
+            disk = load_store(self.store_path)
+            disk_prof = disk.get("profiles", {}).get(self.profile)
+            if disk_prof is not None:
+                if (disk_prof.get("refresh_token") != self.prof.get("refresh_token")
+                        and self._access_valid(disk_prof)):
+                    self._adopt_tokens(disk_prof)
+                    return self.prof["access_token"]
+                rt = disk_prof.get("refresh_token")
+            else:
+                rt = self.prof.get("refresh_token")
+            if not rt:
+                raise XeroError(
+                    f"No refresh_token in profile '{self.profile}'. "
+                    f"Run 'xero auth --profile {self.profile}' again."
+                )
 
-        resp = requests.post(
-            TOKEN_URL,
-            headers={
-                "Authorization": self._basic_auth(),
-                "Content-Type": "application/x-www-form-urlencoded",
-            },
-            data={"grant_type": "refresh_token", "refresh_token": rt},
-            timeout=30,
-        )
-        if resp.status_code != 200:
-            # Do NOT touch the store on failure: the old refresh token may still be
-            # valid (e.g. transient network/5xx). Only invalid_grant means it is dead.
-            raise XeroError(
-                f"Refresh failed ({resp.status_code}): {resp.text}\n"
-                "If this is 'invalid_grant', the refresh token is dead "
-                "(unused >60 days, revoked, or a rotation was lost). Run 'xero auth' again."
+            resp = requests.post(
+                TOKEN_URL,
+                headers={
+                    "Authorization": self._basic_auth(),
+                    "Content-Type": "application/x-www-form-urlencoded",
+                },
+                data={"grant_type": "refresh_token", "refresh_token": rt},
+                timeout=30,
             )
+            if resp.status_code != 200:
+                # Do NOT touch the store on failure: the old refresh token may still be
+                # valid (e.g. transient network/5xx). Only invalid_grant means it is dead.
+                raise XeroError(
+                    f"Refresh failed ({resp.status_code}): {resp.text}\n"
+                    "If this is 'invalid_grant', the refresh token is dead "
+                    "(unused >60 days, revoked, or a rotation was lost). Run 'xero auth' again."
+                )
 
-        tok = resp.json()
-        # Persist BEFORE anything else. This is the whole point.
-        self.prof["access_token"] = tok["access_token"]
-        self.prof["refresh_token"] = tok["refresh_token"]  # rotated value
-        self.prof["expires_at"] = time.time() + tok["expires_in"] - EXPIRY_BUFFER
-        if tok.get("scope"):
-            self.prof["scope"] = tok["scope"]
-        self._save_store()
-        return self.prof["access_token"]
+            tok = resp.json()
+            # Persist BEFORE anything else (and before releasing the lock). This is
+            # the whole point.
+            self.prof["access_token"] = tok["access_token"]
+            self.prof["refresh_token"] = tok["refresh_token"]  # rotated value
+            self.prof["expires_at"] = time.time() + tok["expires_in"] - EXPIRY_BUFFER
+            if tok.get("scope"):
+                self.prof["scope"] = tok["scope"]
+            profiles = disk.setdefault("profiles", {})
+            if disk_prof is None:
+                profiles[self.profile] = dict(self.prof)
+            else:
+                for k in TOKEN_FIELDS:
+                    if k in self.prof:
+                        disk_prof[k] = self.prof[k]
+            _atomic_write_json(self.store_path, disk)
+            return self.prof["access_token"]
 
     def ensure_token(self):
-        """Return a valid access token, refreshing (and persisting) only if needed."""
-        exp = self.prof.get("expires_at", 0)
-        if not self.prof.get("access_token") or time.time() >= exp:
-            return self.refresh()
-        return self.prof["access_token"]
+        """Return a valid access token, refreshing (and persisting) only if needed.
+
+        When the in-memory token has expired, look at disk first: another process
+        may have refreshed already, and its access token is ours to use.
+        """
+        if self._access_valid(self.prof):
+            return self.prof["access_token"]
+        try:
+            disk_prof = load_store(self.store_path).get("profiles", {}).get(self.profile)
+        except (XeroError, OSError, ValueError):
+            disk_prof = None
+        if disk_prof and self._access_valid(disk_prof):
+            self._adopt_tokens(disk_prof)
+            return self.prof["access_token"]
+        return self.refresh()
 
     # ---------- API ----------
 

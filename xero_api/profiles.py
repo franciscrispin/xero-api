@@ -16,7 +16,7 @@ between them without re-authorizing. Adding a new profile is done by `xero auth`
 
 import sys
 
-from .client import XeroClient, list_profiles, load_store, save_store
+from .client import XeroClient, list_profiles, load_store, update_store
 
 
 def cmd_list(store_path=None):
@@ -33,12 +33,13 @@ def cmd_list(store_path=None):
 
 
 def cmd_use(name, store_path=None):
-    store = load_store(store_path)
-    if name not in store.get("profiles", {}):
-        available = ", ".join(store.get("profiles", {})) or "(none)"
-        sys.exit(f"Profile '{name}' not found. Available: {available}.")
-    store["active"] = name
-    save_store(store, store_path)
+    def activate(store):
+        if name not in store.get("profiles", {}):
+            available = ", ".join(store.get("profiles", {})) or "(none)"
+            sys.exit(f"Profile '{name}' not found. Available: {available}.")
+        store["active"] = name
+
+    store = update_store(activate, store_path)
     tenant = store["profiles"][name].get("tenant_name")
     print(f"Active profile is now '{name}'  (tenant: {tenant}).")
 

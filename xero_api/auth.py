@@ -40,6 +40,7 @@ from .client import (
     load_credentials,
     resolve_env_path,
     resolve_store_path,
+    store_lock,
 )
 
 AUTHORIZE_URL = "https://login.xero.com/identity/connect/authorize"
@@ -405,11 +406,12 @@ def run(args):
 
     # Merge into the existing store, preserving other profiles, and activate this one.
     ensure_dir_0700(store_path.parent)
-    store = _load_store_or_empty(store_path)
-    existed = profile_name in store["profiles"]
-    store["profiles"][profile_name] = profile
-    store["active"] = profile_name
-    _atomic_write_json(store_path, store)
+    with store_lock(store_path):
+        store = _load_store_or_empty(store_path)
+        existed = profile_name in store["profiles"]
+        store["profiles"][profile_name] = profile
+        store["active"] = profile_name
+        _atomic_write_json(store_path, store)
 
     verb = "Updated" if existed else "Added"
     print(f"\n{verb} profile '{profile_name}' in {store_path} and set it active.")

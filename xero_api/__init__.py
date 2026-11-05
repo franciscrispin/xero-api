@@ -25,6 +25,7 @@ from .client import (
     list_profiles,
     load_store,
     save_store,
+    update_store,
 )
 
 __version__ = "2.0.0"
@@ -39,5 +40,6 @@ __all__ = [
     "list_profiles",
     "load_store",
     "save_store",
+    "update_store",
     "__version__",
 ]
